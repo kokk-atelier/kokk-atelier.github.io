@@ -366,3 +366,11 @@ html,body{background:var(--paper);color:var(--ink)}
 .price-row>span:first-child{min-width:0}.price-row>span:last-child{white-space:nowrap;font-variant-numeric:tabular-nums}
 .price-row small{color:var(--muted);font-size:11px;margin-left:4px}
 .price-row.total{border-top:1px solid var(--ink);margin-top:6px;padding-top:12px;font-size:13px}.price-row.total strong{font-size:17px;font-weight:600}
+/* 15 Nov: phones in in-app browsers (LINE, Facebook, Instagram, TikTok) — a way out to the phone's browser */
+.inapp-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#c69a57;color:#35271f;font-size:12px;line-height:1.5;padding:9px 44px 9px 16px;position:relative}
+.inapp-bar a{font-weight:600;text-decoration:underline;text-underline-offset:3px}
+.inapp-bar .inapp-hint{font-weight:600}
+.inapp-bar button{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;font-size:20px;min-width:36px;min-height:36px;color:inherit}
+.inapp-note{background:#efe5d4;padding:14px 16px;margin:0 0 16px;font-size:12px;line-height:1.7}
+.inapp-note p{margin:0 0 10px}
+.export-preview.page{max-height:50vh;box-shadow:0 6px 24px #35271f22}

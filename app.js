@@ -239,14 +239,56 @@ async function exportImage(c=config){
 }
 let imageDialogUrl=null;
 function clearImageDialog(){if(imageDialogUrl){URL.revokeObjectURL(imageDialogUrl);imageDialogUrl=null;}}
-function showImageActions(blob){
- showModal('<p class="eyebrow">YOUR PERSONAL KOKK</p><h2 class="modal-title">เก็บภาพใบที่เป็นคุณ</h2><img id="export-preview" class="export-preview" alt="ภาพกระเป๋าที่คุณออกแบบ"><p class="fineprint">'+(host.inClaude?'แตะภาพค้าง หรือคลิกขวาที่ภาพ เพื่อบันทึก':'แตะดาวน์โหลด หรือแตะภาพค้างเพื่อบันทึกลงมือถือ')+'</p><div class="export-actions"><a id="ready-download" class="button dark" download="My-KOKK.png"><span>'+AR_S+' ดาวน์โหลดภาพ</span></a><button class="button outline" id="ready-share" hidden><span>'+AR+' แชร์ / บันทึกลงรูปภาพ</span></button></div>');
- imageDialogUrl=URL.createObjectURL(blob);$('export-preview').src=imageDialogUrl;$('ready-download').href=imageDialogUrl;$('ready-download').hidden=host.inClaude;
- const file=new File([blob],'My-KOKK.png',{type:'image/png'});
- if(navigator.share && navigator.canShare?.({files:[file]})){
+// Phones (14 Nov, user: many phone brands in Thailand, make saving work everywhere). Saving on a phone always goes through
+// this card: the file is ready first, then a fresh tap downloads or shares it (a download fired late after an async step is
+// dropped by some browsers). In-app browsers (LINE, Facebook, Instagram, TikTok...) often cannot save files at all, so the
+// card says so, offers to open the page in the phone's browser, and the preview is a data: picture that a long press can save.
+function inAppName(ua=navigator.userAgent){
+ if(/\bLine\//i.test(ua))return 'LINE';
+ if(/FBAN|FBAV|FB_IAB|FBIOS|Messenger/i.test(ua))return 'Facebook';
+ if(/Instagram/i.test(ua))return 'Instagram';
+ if(/musical_ly|BytedanceWebview|TikTok|ByteLocale/i.test(ua))return 'TikTok';
+ if(/MicroMessenger/i.test(ua))return 'WeChat';
+ if(/Android/i.test(ua)&&/;\s*wv\)/.test(ua))return 'แอป';
+ return null;
+}
+const inApp=host.inClaude?null:inAppName();
+function browserLink(){
+ const url=location.origin+location.pathname;
+ if(inApp==='LINE')return url+'?openExternalBrowser=1';
+ if(/Android/i.test(navigator.userAgent))return 'intent://'+location.host+location.pathname+'#Intent;scheme=https;end';
+ return null;                                   // iPhone in Facebook/Instagram/TikTok: no link can leave the app, the user uses its menu
+}
+function inAppNote(){
+ if(!inApp)return '';
+ const link=browserLink();
+ return `<div class="inapp-note"><p>กำลังเปิดผ่าน${inApp==='แอป'?'แอปอื่น':' '+inApp} ซึ่งอาจบันทึกไฟล์ไม่ได้<br>${link?'เปิดในเบราว์เซอร์ของมือถือ หรือ':'แตะเมนูมุมขวาบนแล้วเลือก "เปิดในเบราว์เซอร์" หรือ'} แตะภาพค้างไว้เพื่อบันทึกเป็นรูป</p>${link?`<a class="button outline" id="open-browser" href="${link}"><span>เปิดในเบราว์เซอร์ ${AR}</span></a>`:'<button class="button outline" id="copy-link" type="button"><span>คัดลอกลิงก์เว็บ</span></button>'}</div>`;
+}
+const blobToDataURL=blob=>new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(blob);});
+async function showFileReady({blob,name,preview=blob,pdf=false}){
+ showModal(`<p class="eyebrow">${pdf?'DESIGN BRIEF · PDF':'YOUR PERSONAL KOKK'}</p><h2 class="modal-title">${pdf?'สรุปดีไซน์พร้อมแล้ว':'เก็บภาพใบที่เป็นคุณ'}</h2>${inAppNote()}<img id="export-preview" class="export-preview${pdf?' page':''}" alt="${pdf?'หน้าสรุปดีไซน์':'ภาพกระเป๋าที่คุณออกแบบ'}"><p class="fineprint">${host.inClaude?'แตะภาพค้าง หรือคลิกขวาที่ภาพ เพื่อบันทึก':pdf?'แตะดาวน์โหลด PDF หรือแตะภาพค้างเพื่อบันทึกเป็นรูป':'แตะดาวน์โหลด หรือแตะภาพค้างเพื่อบันทึกลงมือถือ'}</p><div class="export-actions"><a id="ready-download" class="button dark" download="${name}"><span>${AR_S} ${pdf?'ดาวน์โหลด PDF':'ดาวน์โหลดภาพ'}</span></a><button class="button outline" id="ready-share" hidden><span>${AR} ${pdf?'แชร์ / บันทึกลงไฟล์':'แชร์ / บันทึกลงรูปภาพ'}</span></button></div>`);
+ imageDialogUrl=URL.createObjectURL(blob);$('ready-download').href=imageDialogUrl;$('ready-download').hidden=host.inClaude;
+ const img=$('export-preview');
+ if(inApp)blobToDataURL(preview).then(d=>{if(img.isConnected)img.src=d;}).catch(()=>{img.src=URL.createObjectURL(preview);});
+ else img.src=preview===blob?imageDialogUrl:URL.createObjectURL(preview);
+ if($('copy-link'))$('copy-link').onclick=async()=>{try{await navigator.clipboard.writeText(location.origin+location.pathname);toast('คัดลอกลิงก์แล้ว วางในเบราว์เซอร์ได้เลย');}catch{toast(location.origin+location.pathname);}};
+ const file=new File([blob],name,{type:blob.type});
+ let canShare=false;try{canShare=!!(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]}));}catch{}
+ if(canShare){
   $('ready-share').hidden=false;
-  $('ready-share').onclick=()=>navigator.share({files:[file],title:'My KOKK',text:'A journey, woven mine. — KOKK'}).catch(e=>{if(e.name!=='AbortError')toast('กรุณาแตะดาวน์โหลด หรือแตะภาพค้างเพื่อบันทึก');});
+  $('ready-share').onclick=()=>navigator.share({files:[file],title:'My KOKK',text:'A journey, woven mine. — KOKK'}).catch(e=>{if(e.name!=='AbortError')toast(pdf?'กรุณาแตะดาวน์โหลด PDF หรือแตะภาพค้างเพื่อบันทึก':'กรุณาแตะดาวน์โหลด หรือแตะภาพค้างเพื่อบันทึก');});
  }
+}
+function showImageActions(blob){return showFileReady({blob,name:'My-KOKK.png'});}
+// On load inside an in-app browser: LINE opens the page in the phone's browser by itself when the address carries
+// ?openExternalBrowser=1 (LINE's own feature), so ask once; every in-app browser also gets a slim bar with the way out.
+if(inApp){
+ if(inApp==='LINE'&&!/[?&]openExternalBrowser=1/.test(location.search)){let tried=false;try{tried=sessionStorage.getItem('kokk-line-out')==='1';sessionStorage.setItem('kokk-line-out','1');}catch{}if(!tried)location.replace(browserLink());}
+ const bar=document.createElement('div');bar.className='inapp-bar';bar.setAttribute('role','note');
+ const link=browserLink();
+ bar.innerHTML=`<span>เปิดผ่าน${inApp==='แอป'?'แอปอื่น':' '+inApp} · บันทึกรูปและ PDF ได้ดีกว่าในเบราว์เซอร์</span>${link?`<a href="${link}" id="inapp-open">เปิดในเบราว์เซอร์</a>`:'<span class="inapp-hint">เมนูมุมขวาบน แล้วเลือกเปิดในเบราว์เซอร์</span>'}<button type="button" aria-label="ปิดแถบนี้">×</button>`;
+ bar.querySelector('button').onclick=()=>bar.remove();
+ document.body.prepend(bar);
 }
 $('download-image').onclick=async()=>{const b=$('download-image');b.disabled=true;try{const blob=await exportImage();if(mobileLayout)showImageActions(blob);else{const r=await saveBlob(blob,'KOKK-'+sizes[config.size].label.replace(/ /g,'-')+'-My-Design.png');if(r==='saved')toast('เตรียมภาพสำหรับดาวน์โหลดแล้ว');}}catch{toast('บันทึกภาพไม่สำเร็จ กรุณาลองอีกครั้ง');}finally{b.disabled=false;}};
 $('share-design').onclick=async()=>{const b=$('share-design');b.disabled=true;try{showImageActions(await exportImage());}catch{toast('เตรียมภาพไม่สำเร็จ กรุณาลองอีกครั้ง');}finally{b.disabled=false;}};
@@ -285,8 +327,10 @@ async function makeBrief(c){
 }
 async function downloadBrief(c,button){
  button.disabled=true;
- try{const {pdf,page}=await makeBrief(c);const r=await host.saveFile(pdf,'KOKK-'+sizes[c.size].label.replace(/ /g,'-')+'-Design-Brief.pdf');
-  if(r==='manual')showImageActions(page);else if(r==='saved')toast('บันทึกสรุปดีไซน์ (PDF) แล้ว');}
+ try{const {pdf,page}=await makeBrief(c),name='KOKK-'+sizes[c.size].label.replace(/ /g,'-')+'-Design-Brief.pdf';
+  if(mobileLayout&&!host.inClaude){await showFileReady({blob:pdf,name,preview:page,pdf:true});return;}
+  const r=await host.saveFile(pdf,name);
+  if(r==='manual')showFileReady({blob:page,name:name.replace(/\.pdf$/,'.jpg')});else if(r==='saved')toast('บันทึกสรุปดีไซน์ (PDF) แล้ว');}
  catch{toast('สร้างไฟล์ไม่สำเร็จ กรุณาลองอีกครั้ง');}
  finally{button.disabled=false;}
 }
