@@ -59,13 +59,347 @@ function analyseLogo(data) {
   const { width: w, height: h, data: px } = data;
   let transparent = false;
   for (let i = 3; i < px.length; i += 4) if (px[i] < 250) { transparent = true; break; }
-  // Border: is it one flat colour?
-  const border = []; const push = (x, y) => { const i = (y * w + x) * 4; border.push([px[i], px[i + 1], px[i + 2]]); };
+  // Border: one colour, give or take a texture or a gentle gradient? (17 Nov: a logo on a woven blue was not seen as plain)
+  const border = []; const push = (x, y) => { const i = (y * w + x) * 4; border.push([px[i], px[i + 1], px[i + 2], x / w - .5, y / h - .5]); };
   for (let x = 0; x < w; x += Math.max(1, w / 120 | 0)) { push(x, 0); push(x, h - 1); }
   for (let y = 0; y < h; y += Math.max(1, h / 120 | 0)) { push(0, y); push(w - 1, y); }
-  const avg = [0, 1, 2].map(j => border.reduce((s, p) => s + p[j], 0) / border.length);
-  const flat = border.filter(p => Math.hypot(p[0] - avg[0], p[1] - avg[1], p[2] - avg[2]) < 24).length / border.length > .94;
-  return { source: data, plainBg: !transparent && flat, bg: avg };
+  const mid = [0, 1, 2].map(j => border.map(p => p[j]).sort((a, b) => a - b)[border.length >> 1]);
+  const flat = border.filter(p => Math.hypot(p[0] - mid[0], p[1] - mid[1], p[2] - mid[2]) < 44).length / border.length > .9;
+  // 18 Nov: a gradient backdrop (straight or round) is plain too, so it is cut without the customer ticking anything
+  const smooth = !transparent && !flat && !!borderFit(border);
+  const back = transparent ? null : backdropOf(data);
+  return { source: data, plainBg: !transparent && (flat || smooth) && !!back && back.share > .2, back };
+}
+// Is the border one smooth sheet of colour (flat, a straight or a round gradient)? A quadratic surface per channel is fitted to
+// the border samples twice, the second time without the samples the first fit missed by 44 or more (a logo touching the edge);
+// smooth when nine in ten samples sit within 44 of it. A photo or two colours meeting at the edge do not fit.
+function borderFit(border) {
+  const pts = border, feat = j => { const u = pts[j][3], v = pts[j][4]; return [1, u, v, u * u, v * v, u * v]; };
+  const solve = idx => {
+    const A = Array.from({ length: 6 }, () => new Float64Array(9));
+    for (const j of idx) { const f = feat(j), p = pts[j]; for (let r = 0; r < 6; r++) { for (let c = 0; c < 6; c++) A[r][c] += f[r] * f[c]; for (let k = 0; k < 3; k++) A[r][6 + k] += f[r] * p[k]; } }
+    for (let r = 0; r < 6; r++) A[r][r] += 1e-6;
+    for (let c = 0; c < 6; c++) {
+      let piv = c; for (let r = c + 1; r < 6; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      [A[c], A[piv]] = [A[piv], A[c]]; const d = A[c][c]; if (Math.abs(d) < 1e-12) return null;
+      for (let k = c; k < 9; k++) A[c][k] /= d;
+      for (let r = 0; r < 6; r++) if (r !== c && A[r][c]) { const m = A[r][c]; for (let k = c; k < 9; k++) A[r][k] -= m * A[c][k]; }
+    }
+    return [0, 1, 2].map(k => A.map(row => row[6 + k]));
+  };
+  const miss = (coef, j) => { const f = feat(j); return Math.hypot(...[0, 1, 2].map(k => pts[j][k] - coef[k].reduce((s, c, m) => s + c * f[m], 0))); };
+  const all = pts.map((_, j) => j); let coef = solve(all); if (!coef) return null;
+  const keep = all.filter(j => miss(coef, j) < 44); if (keep.length < 12) return null;
+  coef = solve(keep); if (!coef) return null;
+  return all.filter(j => miss(coef, j) < 44).length / all.length > .9 ? coef : null;
+}
+
+// ---------- logo background removal (17 Nov) ----------
+// User: a chrome star on black kept a dark smear of its glow, and a white logo on a textured blue was not cut at all ("cut it to
+// the shape, make it smarter"). Three steps:
+// 1) Backdrop: grown from the image edge in small colour steps, so a gradient or a woven texture is followed but a glow or the
+//    logo is not (a pixel joins only within STEP of its neighbour and within REACH of the edge colour it grew from). The grown
+//    pixels are averaged on a coarse grid and filled in across the logo: every pixel gets its own backdrop colour.
+// 2) Colour-to-alpha (as in GIMP): a pixel is read as a colour laid over its backdrop at some opacity, and the backdrop's share
+//    is taken out. A glow fading into black becomes light that fades out, so no grey ring is left on the sedge.
+// 3) Only the backdrop and what melts into it changes. Holes in the backdrop colour (inside a ring or a star, the counter of an O)
+//    are backdrop too. On a near-black backdrop a glow is followed outward-in while it rises gently (CLIMB per pixel): the sharp
+//    edge of the logo stops it, so a chrome body keeps its dark reflections. Then a thin edge band (BAND px) round all of that is
+//    softened, scaled to the most solid colour next to it, so edges stay smooth and a pale fill on white keeps its colour with no
+//    darker rim (paper does not glow, so on a light backdrop there is no climbing). The logo's body keeps its exact colours.
+const STEP = 20, REACH = 56, CORE = 16, SOFT = .85, CLIMB = .1, BAND = 3, DARK = .08;
+// 18 Nov: on a backdrop that is not near-black, the colour a pixel is measured against drifts a little (DRIFT) towards each
+// pixel it passes, so the growth follows a straight or a round gradient all the way in (a spotlight behind the logo). On black it
+// stays the edge colour: there a smooth brightening is the logo's glow, which must stay (see step 3).
+const DRIFT = 1 / 24;
+function backdropOf(src) {
+  const { width: w, height: h, data: px } = src, N = w * h;
+  const seed = new Int32Array(N).fill(-1), queue = new Int32Array(N), ref = new Float32Array(N * 3); let head = 0, tail = 0;
+  const d2 = (i, j) => { const a = i * 4, b = j * 4, r = px[a] - px[b], g = px[a + 1] - px[b + 1], c = px[a + 2] - px[b + 2]; return r * r + g * g + c * c; };
+  const off = i => { const a = i * 4, b = i * 3, r = px[a] - ref[b], g = px[a + 1] - ref[b + 1], c = px[a + 2] - ref[b + 2]; return r * r + g * g + c * c; };
+  const start = i => { if (seed[i] < 0 && px[i * 4 + 3] > 200) { seed[i] = i; ref[i * 3] = px[i * 4]; ref[i * 3 + 1] = px[i * 4 + 1]; ref[i * 3 + 2] = px[i * 4 + 2]; queue[tail++] = i; } };
+  for (let x = 0; x < w; x++) { start(x); start((h - 1) * w + x); }
+  for (let y = 1; y < h - 1; y++) { start(y * w); start(y * w + w - 1); }
+  while (head < tail) {
+    const i = queue[head++], s = seed[i], x = i % w;
+    const lam = (.2126 * px[s * 4] + .7152 * px[s * 4 + 1] + .0722 * px[s * 4 + 2]) / 255 < DARK ? 0 : DRIFT;
+    for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+      if (j < 0 || j >= N || seed[j] >= 0 || px[j * 4 + 3] <= 200 || d2(i, j) >= STEP * STEP) continue;
+      const a = i * 3, b = j * 3, r = px[j * 4] - ref[a], g = px[j * 4 + 1] - ref[a + 1], c = px[j * 4 + 2] - ref[a + 2];
+      if (r * r + g * g + c * c >= REACH * REACH) continue;
+      // drift only where the colour changes gently all round (a gradient): at an edge (a step of more than 8 to a neighbour) it
+      // walked along a pale ring's soft rim and into the ring; nor into a plain darkening of the carried colour (one ratio on every
+      // channel): that is a shadow, and following it led the growth into a grey panel the shadow fell from
+      let l = lam;
+      if (l) { const jx = j % w; for (const k of [jx > 0 ? j - 1 : -1, jx < w - 1 ? j + 1 : -1, j - w, j + w]) if (k >= 0 && k < N && d2(j, k) > 64) { l = 0; break; } }
+      if (l) {
+        let lo = 9, hi = -9, m = 0, k = 0;
+        for (let q = 0; q < 3; q++) if (ref[a + q] >= 40) { const t = px[j * 4 + q] / ref[a + q]; lo = Math.min(lo, t); hi = Math.max(hi, t); m += t; k++; }
+        if (k && hi - lo < .06 && m / k < .995) l = 0;
+      }
+      seed[j] = s; ref[b] = ref[a] + r * l; ref[b + 1] = ref[a + 1] + g * l; ref[b + 2] = ref[a + 2] + c * l; queue[tail++] = j;
+    }
+  }
+  if (!tail) return null;
+  const cs = Math.max(6, Math.ceil(Math.max(w, h) / 24)), gw = Math.ceil(w / cs), gh = Math.ceil(h / cs), G = gw * gh;
+  let cell = new Float32Array(G * 4);
+  // only core pixels (close to the colour they were measured against) set the colour: a glow's dim rim must not lift a black
+  // backdrop to grey
+  const core = i => seed[i] >= 0 && off(i) < CORE * CORE;
+  for (let i = 0; i < N; i++) if (core(i)) { const c = (((i / w) | 0) / cs | 0) * gw + ((i % w) / cs | 0) << 2; cell[c] += px[i * 4]; cell[c + 1] += px[i * 4 + 1]; cell[c + 2] += px[i * 4 + 2]; cell[c + 3]++; }
+  for (let c = 0; c < G * 4; c += 4) if (cell[c + 3]) { const n = cell[c + 3]; cell[c] /= n; cell[c + 1] /= n; cell[c + 2] /= n; cell[c + 3] = 1; }
+  for (let pass = 0; pass < gw + gh; pass++) {            // cells under the logo take the mean of their filled neighbours
+    const next = cell.slice(); let empty = 0;
+    for (let cy = 0; cy < gh; cy++) for (let cx = 0; cx < gw; cx++) {
+      const c = (cy * gw + cx) * 4; if (cell[c + 3]) continue;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cy + dy; if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+        const k = (ny * gw + nx) * 4; if (cell[k + 3]) { r += cell[k]; g += cell[k + 1]; b += cell[k + 2]; n++; }
+      }
+      if (n) { next[c] = r / n; next[c + 1] = g / n; next[c + 2] = b / n; next[c + 3] = 1; } else empty++;
+    }
+    cell = next; if (!empty) break;
+  }
+  // texture of the backdrop: how far its own pixels stray from the grown pixels round them (sets the noise floor of step 2;
+  // 18 Nov: measured locally, so a gradient or a shadow's soft rim is not taken for texture)
+  const at = backdropAt({ cell, gw, gh, cs });
+  const stray = [];
+  for (let i = 0; i < N; i += 7) {
+    if (seed[i] < 0) continue;
+    const x = i % w, y = (i / w) | 0; let r = 0, g = 0, b = 0, n = 0, s = seed[i];
+    if ((.2126 * px[s * 4] + .7152 * px[s * 4 + 1] + .0722 * px[s * 4 + 2]) / 255 < DARK) {   // on black as before: from the smooth colour
+      const f = at(x, y); stray.push(Math.hypot(px[i * 4] - f[0], px[i * 4 + 1] - f[1], px[i * 4 + 2] - f[2])); continue;
+    }
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy, j = ny * w + nx; if ((dx || dy) && nx >= 0 && ny >= 0 && nx < w && ny < h && seed[j] >= 0) { r += px[j * 4]; g += px[j * 4 + 1]; b += px[j * 4 + 2]; n++; } }
+    if (n) stray.push(Math.hypot(px[i * 4] - r / n, px[i * 4 + 1] - g / n, px[i * 4 + 2] - b / n));
+  }
+  stray.sort((a, b) => a - b);
+  return { grown: seed, ref, share: tail / N, at, noise: Math.max(8, Math.min(48, (stray[Math.floor(stray.length * .95)] || 0) * 1.3)) };
+}
+// bilinear backdrop colour at a pixel, from the coarse grid
+function backdropAt({ cell, gw, gh, cs }) {
+  const out = [0, 0, 0];
+  return (x, y) => {
+    const fx = Math.max(0, Math.min(gw - 1, x / cs - .5)), fy = Math.max(0, Math.min(gh - 1, y / cs - .5));
+    const x0 = fx | 0, y0 = fy | 0, x1 = Math.min(gw - 1, x0 + 1), y1 = Math.min(gh - 1, y0 + 1), tx = fx - x0, ty = fy - y0;
+    for (let k = 0; k < 3; k++) {
+      const a = cell[(y0 * gw + x0) * 4 + k], b = cell[(y0 * gw + x1) * 4 + k], c = cell[(y1 * gw + x0) * 4 + k], d = cell[(y1 * gw + x1) * 4 + k];
+      out[k] = (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+    }
+    return out;
+  };
+}
+// Removes the backdrop in place (ImageData pixels). Returns nothing; see the notes above backdropOf, and these, added 18 Nov
+// after a test with hard made-up logos (user: "make it smarter, but keep it simple: customers bring their own logo files"):
+// - off black, a grown pixel is backdrop outright (measured against the coarse grid, the sharp edge of a white card on a grey
+//   page left a faint outline, and the faint rim of a shadow a thin line); on black it still fades, as a glow's rim must;
+// - a soft drop shadow on a light or mid backdrop (the backdrop's own colour, only darker, that fades in from the backdrop side
+//   and meets the logo) is taken out like backdrop, and the logo's edge next to it is cut against the shadow's colour. A grey part
+//   of the logo has a crisp edge, so it stays;
+// - on a light or mid backdrop a hole of 4 px is a hole (the counter of a small A), and a slit 1-2 px wide that holds no pure
+//   backdrop pixel (the gap inside a letter of a small or soft image) is found as a run of pixels far more see-through than the
+//   logo on both sides and coloured as a blend of the two. On black a small dark speck stays: it is a chrome reflection;
+// - loose specks of the backdrop's texture (a dark thread of a weave) left standing alone are cleared.
+function cutBackdrop(px, w, h, back, debug) {
+  const N = w * h, { grown, ref, at, noise } = back, src = px.slice();
+  const alpha = new Float32Array(N), bgR = new Float32Array(N), bgG = new Float32Array(N), bgB = new Float32Array(N), dark = new Uint8Array(N);
+  // colour-to-alpha against a backdrop colour (as in GIMP), gated by the backdrop's own texture
+  const c2a = (i, b0, b1, b2) => {
+    const r = px[i * 4], g = px[i * 4 + 1], bl = px[i * 4 + 2];
+    const a = Math.max(r > b0 ? (r - b0) / (255 - b0 || 1) : (b0 - r) / (b0 || 1), g > b1 ? (g - b1) / (255 - b1 || 1) : (b1 - g) / (b1 || 1), bl > b2 ? (bl - b2) / (255 - b2 || 1) : (b2 - bl) / (b2 || 1));
+    return Math.min(1, a) * Math.max(0, Math.min(1, (Math.hypot(r - b0, g - b1, bl - b2) - noise) / noise));
+  };
+  for (let i = 0; i < N; i++) {
+    const b = at(i % w, (i / w) | 0);
+    dark[i] = (.2126 * b[0] + .7152 * b[1] + .0722 * b[2]) / 255 < DARK ? 1 : 0;
+    bgR[i] = b[0]; bgG[i] = b[1]; bgB[i] = b[2]; alpha[i] = c2a(i, b[0], b[1], b[2]);
+    if (grown[i] < 0) continue;
+    const r0 = ref[i * 3], r1 = ref[i * 3 + 1], r2 = ref[i * 3 + 2];
+    if (!dark[i]) { alpha[i] = 0; bgR[i] = r0; bgG[i] = r1; bgB[i] = r2; continue; }   // off black, grown is backdrop: all of it goes
+    const a = c2a(i, r0, r1, r2); if (a < alpha[i]) { alpha[i] = a; bgR[i] = r0; bgG[i] = r1; bgB[i] = r2; }   // on black: a glow's rim fades
+  }
+  const seen = new Uint8Array(N), queue = new Int32Array(N), depth = new Uint8Array(N), own = new Uint8Array(N), comp = new Int32Array(N); let tail = 0;
+  const near = i => { const x = i % w; return [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]; };
+  // seeds: the grown backdrop, plus holes of backdrop colour that the edge could not reach
+  for (let i = 0; i < N; i++) if (grown[i] >= 0) { seen[i] = 2; queue[tail++] = i; }
+  for (let i = 0; i < N; i++) {
+    if (seen[i] || alpha[i] >= .1 || px[i * 4 + 3] <= 200) continue;
+    let n = 0, qh = 0; comp[n++] = i; seen[i] = 3;
+    while (qh < n) { const p = comp[qh++]; for (const j of near(p)) if (j >= 0 && j < N && !seen[j] && alpha[j] < .1 && px[j * 4 + 3] > 200) { seen[j] = 3; comp[n++] = j; } }
+    if (n >= (dark[i] ? 12 : 4)) for (let k = 0; k < n; k++) { seen[comp[k]] = 2; queue[tail++] = comp[k]; }
+    else for (let k = 0; k < n; k++) seen[comp[k]] = 4;   // a speck inside the logo: keep it (unless it is part of a slit)
+  }
+  // drop shadow: how much darker than its backdrop a pixel is, when it is the backdrop's own colour, only darker
+  const shade = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    if (seen[i] !== 0 || dark[i] || px[i * 4 + 3] <= 200) continue;
+    let lo = 9, hi = -9, sum = 0, n = 0, ok = true;
+    for (let k = 0; k < 3 && ok; k++) {
+      const c = px[i * 4 + k], b = k === 0 ? bgR[i] : k === 1 ? bgG[i] : bgB[i];
+      if (c > b + 8) ok = false; else if (b >= 40) { const r = c / b; lo = Math.min(lo, r); hi = Math.max(hi, r); sum += r; n++; }
+    }
+    if (!ok || !n || hi - lo > .1) continue;
+    const s = 1 - sum / n; if (s > .03 && s < .65) shade[i] = s;   // a shadow is see-through: darker than .65 is a dark part of the logo (brown letters on yellow)
+  }
+  // a flat grey panel of the logo is one even shade (5 x 5 round a pixel within .012), a shadow never is: panels of 64 px or
+  // more, with their edges, are logo, and the shadow they cast is read apart from them
+  const flat = new Uint8Array(N), pd = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (!shade[i]) continue;
+    const x = i % w, y = (i / w) | 0; if (x < 2 || y < 2 || x >= w - 2 || y >= h - 2) continue;
+    let lo = 9, hi = -9, ok = true;
+    for (let dy = -2; dy <= 2 && ok; dy++) for (let dx = -2; dx <= 2; dx++) { const s = shade[i + dy * w + dx]; if (!s) { ok = false; break; } lo = Math.min(lo, s); hi = Math.max(hi, s); }
+    if (ok && hi - lo < .012) flat[i] = 1;
+  }
+  for (let i = 0; i < N; i++) {
+    if (flat[i] !== 1) continue;
+    let n = 0, qh = 0, sum = 0; comp[n++] = i; flat[i] = 2;
+    while (qh < n) { const p = comp[qh++]; sum += shade[p]; for (const j of near(p)) if (j >= 0 && j < N && flat[j] === 1) { flat[j] = 2; comp[n++] = j; } }
+    if (n < 64) continue;
+    // with its edge pixels of the same shade (2 px at most): a panel has a crisp rim (the backdrop, or a step of .05 to the shadow
+    // it casts) along at least half of its outline; where shadows of several strokes overlap they are flat too, but fade out
+    const s0 = sum / n, core = n;
+    for (let k = 0; k < n; k++) {
+      const p = comp[k], d = k < core ? 0 : pd[p]; if (d >= 2) continue;
+      for (const j of near(p)) if (j >= 0 && j < N && shade[j] && flat[j] !== 2 && flat[j] !== 3 && Math.abs(shade[j] - s0) < .02) { flat[j] = 3; pd[j] = d + 1; comp[n++] = j; }
+    }
+    let rim = 0, crisp = 0;
+    for (let k = 0; k < n; k++) { const p = comp[k]; for (const j of near(p)) { if (j < 0 || j >= N || flat[j] === 2 || flat[j] === 3 || (seen[j] !== 2 && !shade[j])) continue; rim++; if (Math.hypot(px[p * 4] - px[j * 4], px[p * 4 + 1] - px[j * 4 + 1], px[p * 4 + 2] - px[j * 4 + 2]) >= 20) crisp++; } }
+    if (rim && crisp / rim >= .5) for (let k = 0; k < n; k++) shade[comp[k]] = 0;
+  }
+  const done = new Uint8Array(N), cid = new Int32Array(N), vals = [], steps = [], rest = []; let mainTop = 0, id = 0;
+  const toShadow = list => { for (const p of list) { seen[p] = 6; own[p] = 1; bgR[p] = px[p * 4]; bgG[p] = px[p * 4 + 1]; bgB[p] = px[p * 4 + 2]; alpha[p] = 0; queue[tail++] = p; } };
+  for (let i = 0; i < N; i++) {
+    if (!shade[i] || done[i]) continue;
+    let n = 0, qh = 0, body = 0; comp[n++] = i; done[i] = 1; cid[i] = ++id;
+    while (qh < n) { const p = comp[qh++]; for (const j of near(p)) if (j >= 0 && j < N && !done[j] && shade[j]) { done[j] = 1; cid[j] = id; comp[n++] = j; } }
+    // where it meets the backdrop, the colour step: a shadow goes on fading across that line, the edge of a grey part does not
+    steps.length = 0;
+    for (let k = 0; k < n; k++) {
+      const p = comp[k];
+      for (const j of near(p)) {
+        if (j < 0 || j >= N || cid[j] === id) continue;
+        if (seen[j] === 2) steps.push(Math.hypot(px[p * 4] - px[j * 4], px[p * 4 + 1] - px[j * 4 + 1], px[p * 4 + 2] - px[j * 4 + 2]));
+        else if ((seen[j] === 0 || seen[j] === 4) && alpha[j] >= .1) body++;
+      }
+    }
+    if (!body) continue;                                      // a shadow meets the shape that casts it
+    vals.length = 0; for (let k = 0; k < n; k++) vals.push(shade[comp[k]]);
+    vals.sort((a, b) => a - b); const top = vals[Math.floor(n * .9)], most = vals[n - 1];
+    const pix = Array.from(comp.subarray(0, n)), spread = vals[Math.floor(n * .75)] - vals[Math.floor(n * .25)];
+    if (n < 8 || !steps.length) { rest.push({ pix, top, spread }); continue; }
+    steps.sort((a, b) => a - b);
+    if (steps[steps.length >> 1] < 12) { toShadow(pix); mainTop = Math.max(mainTop, most); } else rest.push({ pix, top, spread });
+  }
+  // once the logo is known to cast a soft shadow, the pieces of it caught in a counter or between letters go too: no darker
+  // than that shadow, meeting the logo, and either touching the backdrop or the shadow, or a patch at least 3 px across (a
+  // counter wholly in shadow). The 1 px blend round a dark letter on a grey panel is neither, so it stays.
+  if (mainTop) for (const { pix } of rest) {
+    if (pix.length < 4 || pix.some(p => shade[p] > mainTop * 1.1)) continue;
+    const mine = new Set(pix);
+    const meets = pix.some(p => near(p).some(j => j >= 0 && j < N && (seen[j] === 2 || seen[j] === 6)));
+    const patch = meets || pix.some(p => { const x = p % w; return x > 0 && x < w - 1 && [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1].every(d => mine.has(p + d)); });
+    if (patch) toShadow(pix);
+  }
+  // glow on a near-black backdrop: climb while it rises gently
+  let head = 0;
+  while (head < tail) {
+    const i = queue[head++];
+    for (const j of near(i)) {
+      if (j < 0 || j >= N || (seen[j] !== 0 && seen[j] !== 4) || !dark[j] || alpha[j] >= SOFT || alpha[j] - alpha[i] >= CLIMB) continue;
+      seen[j] = 1; queue[tail++] = j;
+    }
+  }
+  // edge band round the backdrop, the glow and the shadow (next to a shadow the edge is read against the shadow's colour)
+  head = 0;
+  while (head < tail) {
+    const i = queue[head++];
+    if (depth[i] >= BAND) continue;
+    for (const j of near(i)) {
+      if (j < 0 || j >= N || seen[j] === 1 || seen[j] === 2 || seen[j] === 5 || seen[j] === 6) continue;
+      if (own[i]) { const a = c2a(j, bgR[i], bgG[i], bgB[i]); if (a >= SOFT) continue; own[j] = 1; bgR[j] = bgR[i]; bgG[j] = bgG[i]; bgB[j] = bgB[i]; alpha[j] = a; }
+      else if (alpha[j] >= SOFT) continue;
+      seen[j] = 5; depth[j] = depth[i] + 1; queue[tail++] = j;
+    }
+  }
+  // slits on a light or mid backdrop (inside the logo: the edge band is done)
+  const slit = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if ((seen[i] !== 0 && seen[i] !== 4) || dark[i] || alpha[i] > .7 || px[i * 4 + 3] <= 200) continue;
+    const x = i % w, y = (i / w) | 0; let best = 0, p0 = -1, q0 = -1;
+    for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) for (let d = 1; d <= 2; d++) {
+      const ax = x - dx * d, ay = y - dy * d, bx = x + dx * d, by = y + dy * d;
+      if (ax < 0 || bx < 0 || ax >= w || bx >= w || ay < 0 || by < 0 || ay >= h || by >= h) continue;
+      const p = ay * w + ax, q = by * w + bx; if ((seen[p] !== 0 && seen[p] !== 4) || (seen[q] !== 0 && seen[q] !== 4)) continue;
+      const v = Math.min(alpha[p], alpha[q]) - alpha[i]; if (v > best) { best = v; p0 = p; q0 = q; }
+    }
+    if (best < .3) continue;
+    if (Math.hypot(px[p0 * 4] - px[q0 * 4], px[p0 * 4 + 1] - px[q0 * 4 + 1], px[p0 * 4 + 2] - px[q0 * 4 + 2]) > 80) continue;   // one colour on both sides
+    const s0 = (px[p0 * 4] + px[q0 * 4]) / 2 - bgR[i], s1 = (px[p0 * 4 + 1] + px[q0 * 4 + 1]) / 2 - bgG[i], s2 = (px[p0 * 4 + 2] + px[q0 * 4 + 2]) / 2 - bgB[i];
+    const ee = s0 * s0 + s1 * s1 + s2 * s2; if (ee < 900) continue;
+    const c0 = px[i * 4] - bgR[i], c1 = px[i * 4 + 1] - bgG[i], c2 = px[i * 4 + 2] - bgB[i], t = (c0 * s0 + c1 * s1 + c2 * s2) / ee;
+    if (t > -.1 && t < .85 && Math.hypot(c0 - t * s0, c1 - t * s1, c2 - t * s2) < 28) slit[i] = 1;   // a blend of the two
+  }
+  // three or more together make a slit (a lone pixel is texture), and it opens into few pale pixels: a pale run that belongs to a
+  // wide pale area (a grey panel the letters sit on, where two strokes nearly meet) is that area, not a gap
+  const pale = j => (seen[j] === 0 || seen[j] === 4) && !slit[j] && alpha[j] >= .03 && alpha[j] < .7;
+  const pv = new Int32Array(N), pq = new Int32Array(N); let sid = 0;
+  for (let i = 0; i < N; i++) {
+    if (slit[i] !== 1) continue;
+    let n = 0, qh = 0; comp[n++] = i; slit[i] = 2;
+    while (qh < n) { const p = comp[qh++], x = p % w, y = (p / w) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy, j = ny * w + nx; if (nx >= 0 && ny >= 0 && nx < w && ny < h && slit[j] === 1) { slit[j] = 2; comp[n++] = j; } } }
+    if (n < 3) continue;
+    const cap = 4 * n + 24; let m = 0, ph = 0; sid++;
+    const reach = p => { const x = p % w, y = (p / w) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy, j = ny * w + nx; if (nx >= 0 && ny >= 0 && nx < w && ny < h && pv[j] !== sid && pale(j)) { pv[j] = sid; pq[m++] = j; if (m > cap) return; } } };
+    for (let k = 0; k < n && m <= cap; k++) reach(comp[k]);
+    while (ph < m && m <= cap) reach(pq[ph++]);
+    if (m <= cap) for (let k = 0; k < n; k++) { seen[comp[k]] = 5; depth[comp[k]] = BAND; slit[comp[k]] = 3; }
+  }
+  // a slit 2 px wide holds a second row that is mostly logo: the soft pixels right beside a slit are its edge, read the same way
+  // (and a speck of pure backdrop at its end, kept so far as a dot of the design, is part of it)
+  for (let pass = 0; pass < 3; pass++) for (let i = 0; i < N; i++) {
+    if (slit[i] !== 3) continue;
+    for (const j of near(i)) {
+      if (j < 0 || j >= N || dark[j]) continue;
+      if (seen[j] === 4) { seen[j] = 5; depth[j] = BAND; slit[j] = 3; }
+      else if (!pass && !seen[j] && alpha[j] < SOFT && alpha[j] > alpha[i]) { seen[j] = 5; depth[j] = BAND; }
+    }
+  }
+  if (debug) Object.assign(debug, { seen: seen.slice(), alpha: alpha.slice(), w, h, px });   // test page only: px ends up as the result
+  for (let i = 0; i < N; i++) {
+    if (seen[i] === 6) { px[i * 4 + 3] = 0; continue; }
+    if (seen[i] !== 1 && seen[i] !== 2 && seen[i] !== 5) continue;
+    let a = alpha[i];
+    if (seen[i] === 5) {                                     // edge band: scale to the logo's own solid colour (unreached, within
+      const x = i % w, y = (i / w) | 0; let top = 0;          // BAND + 1 px); none near: a stray thread of a texture, left as it is
+      // (next to a shadow the solid colour is read against the same shadow colour as this pixel: against a dark shadow a dark
+      // letter never looks solid, and its edge was being made see-through, 18 Nov)
+      for (let dy = -BAND - 1; dy <= BAND + 1; dy++) for (let dx = -BAND - 1; dx <= BAND + 1; dx++) { const nx = x + dx, ny = y + dy, k = ny * w + nx; if (nx >= 0 && ny >= 0 && nx < w && ny < h && !seen[k]) top = Math.max(top, own[i] ? c2a(k, bgR[i], bgG[i], bgB[i]) : alpha[k]); }
+      if (top > 0) a = Math.min(1, a / top);
+    }
+    if (a <= .004) { px[i * 4 + 3] = 0; continue; }
+    const b = [bgR[i], bgG[i], bgB[i]];
+    for (let k = 0; k < 3; k++) px[i * 4 + k] = Math.max(0, Math.min(255, Math.round(b[k] + (px[i * 4 + k] - b[k]) / a)));
+    px[i * 4 + 3] = Math.round(px[i * 4 + 3] * a);
+  }
+  // loose specks: up to 12 px standing alone (nothing else visible within 3 px), in the backdrop's colour or a darker shade of it
+  let total = 0; for (let i = 0; i < N; i++) if (px[i * 4 + 3] > 8) total++;
+  const S = Math.min(12, Math.max(3, Math.round(total * .0015))), mark = new Int32Array(N); id = 0;
+  for (let i = 0; i < N; i++) {
+    if (mark[i] || px[i * 4 + 3] <= 8) continue;
+    let n = 0, qh = 0; comp[n++] = i; mark[i] = ++id;
+    while (qh < n) { const p = comp[qh++], x = p % w, y = (p / w) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy, j = ny * w + nx; if (nx >= 0 && ny >= 0 && nx < w && ny < h && !mark[j] && px[j * 4 + 3] > 8) { mark[j] = id; comp[n++] = j; } } }
+    if (n > S) continue;
+    let alone = true;
+    for (let k = 0; k < n && alone; k++) { const x = comp[k] % w, y = (comp[k] / w) | 0; for (let dy = -3; dy <= 3 && alone; dy++) for (let dx = -3; dx <= 3; dx++) { const nx = x + dx, ny = y + dy, j = ny * w + nx; if (nx >= 0 && ny >= 0 && nx < w && ny < h && mark[j] !== id && px[j * 4 + 3] > 8) { alone = false; break; } } }
+    if (!alone) continue;
+    const c = [0, 0, 0], b = [0, 0, 0];
+    for (let k = 0; k < n; k++) { const p = comp[k]; for (let m = 0; m < 3; m++) c[m] += src[p * 4 + m] / n; b[0] += bgR[p] / n; b[1] += bgG[p] / n; b[2] += bgB[p] / n; }
+    const rs = [0, 1, 2].filter(m => b[m] >= 40).map(m => c[m] / b[m]);
+    const darker = c.every((v, m) => v <= b[m] + 8) && rs.length && Math.max(...rs) - Math.min(...rs) < .15;
+    if (darker || Math.hypot(c[0] - b[0], c[1] - b[1], c[2] - b[2]) < 3.5 * noise) for (let k = 0; k < n; k++) px[comp[k] * 4 + 3] = 0;
+  }
 }
 // Brand colours in a block of pixels: up to 3, ranked by area x saturation and at least 60 apart in RGB. See-through
 // pixels are skipped. Paper never counts: white, grey and black are left out, and the "big enough" bar is a share of
@@ -110,13 +444,13 @@ export function readPalette(logo) {
 }
 // Returns { dataUrl, palette, dominant, lightness, aspect } from an analysed logo.
 export function processLogo(logo, knockout) {
-  const { source, bg } = logo, w = source.width, h = source.height;
+  const { source } = logo, w = source.width, h = source.height;
   const out = new ImageData(new Uint8ClampedArray(source.data), w, h), px = out.data;
-  if (knockout && logo.plainBg) {
-    for (let i = 0; i < px.length; i += 4) {
-      const d = Math.hypot(px[i] - bg[0], px[i + 1] - bg[1], px[i + 2] - bg[2]);
-      if (d < 20) px[i + 3] = 0; else if (d < 56) px[i + 3] = Math.round(px[i + 3] * (d - 20) / 36);
-    }
+  if (knockout && logo.back) {
+    cutBackdrop(px, w, h, logo.back, globalThis.__kokkCutDebug);
+    // safety net (18 Nov): a cut that leaves next to nothing took the logo for backdrop, so the logo is shown as it came
+    let left = 0; for (let i = 3; i < px.length; i += 4) if (px[i] > 8) left++;
+    if (left < Math.max(24, w * h * .002)) px.set(source.data);
   }
   // trim transparent margins
   let x0 = w, y0 = h, x1 = -1, y1 = -1;
@@ -232,7 +566,7 @@ const RECIPES = {
     if (ci.logo) {
       Object.assign(cfg, { artwork: ci.logo.dataUrl, artScale: clamp(Math.round(MARK[size] * Math.sqrt(ci.logo.aspect || 1) * 100), 15, 80), artPosition: 'center', artY: 46, artInk: null });
       if (reads(ci.logo, SEDGE) < READS) cfg.patch = sedgeFor(ci, null, [contrast(shell, SEDGE) >= 1.6 ? shell : null, ...shows, c.dark, ESPRESSO]);
-      mark = cfg.patch ? 'โลโก้สีจริงขนาดเล็กบนป้ายสานสีแบรนด์ ' : 'โลโก้สีจริงขนาดเล็กแบบตราสัญลักษณ์ ';
+      mark = cfg.patch ? 'โลโก้สีจริงขนาดเล็ก ขอบสีแบรนด์ตามรูปทรงโลโก้ให้เห็นชัดบนกก ' : 'โลโก้สีจริงขนาดเล็กแบบตราสัญลักษณ์ ';
     } else if (ci.name) {
       Object.assign(cfg, { name: ci.name, font: 'serif', nameSize: { s: 24, m: 30, l: 38 }[size], nameX: 50, nameY: 46, nameColor: !metal && contrast(shell, SEDGE) >= 3 ? shell : ESPRESSO });
       mark = 'ชื่อแบรนด์อยู่กลางแผง ';
@@ -369,7 +703,7 @@ export function initBrands({ R, host, toast, showImage, applyDesign }) {
   const io = 'IntersectionObserver' in window ? new IntersectionObserver(entries => entries.forEach(e => { if (e.isIntersecting) { io.unobserve(e.target); e.target._paint?.(); } }), { rootMargin: '200px' }) : null;
   function specLine(cfg) {
     const mark = cfg.artwork ? (cfg.artInk ? 'สีเดียว ' : 'สีจริง ') + ({ upper: 'ด้านบน', center: 'กลางแผง', lower: 'ด้านล่าง' })[cfg.artPosition] : cfg.name ? 'ตัวอักษร ' + cfg.name : 'ไม่มี';
-    return `โครง ${colorLabel(cfg.shell)} · กก ${colorLabel(cfg.weave)} · ลาย${PATTERN_TH[cfg.pattern]}${cfg.accent && cfg.pattern !== 'twill' ? ' สี ' + colorLabel(cfg.accent) : ''}${cfg.trim ? ' · เส้นกุ๊น ' + colorLabel(cfg.trim) : ''} · โลโก้ ${mark}${cfg.artwork && cfg.patch ? ' บนป้าย ' + colorLabel(cfg.patch) : ''}`;
+    return `โครง ${colorLabel(cfg.shell)} · กก ${colorLabel(cfg.weave)} · ลาย${PATTERN_TH[cfg.pattern]}${cfg.accent && cfg.pattern !== 'twill' ? ' สี ' + colorLabel(cfg.accent) : ''}${cfg.trim ? ' · เส้นกุ๊น ' + colorLabel(cfg.trim) : ''} · โลโก้ ${mark}${cfg.artwork && cfg.patch ? ' ขอบตามรูปทรง ' + colorLabel(cfg.patch) : ''}`;
   }
   const esc = v => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   // Tune: the visitor's own choices on the Signature card. frame = a CI colour, 'metal' (champagne) or null (the engine decides); mark = logo size.
@@ -479,6 +813,7 @@ export function initBrands({ R, host, toast, showImage, applyDesign }) {
     state.logoInfo = processLogo(state.logo, $('logo-knockout').checked);
     $('logo-preview').src = state.logoInfo.dataUrl; $('logo-tile').hidden = false; $('logo-empty').hidden = true; $('logo-tools').hidden = false;
     $('logo-drop').classList.add('has-logo');
+    $('logo-tile').classList.toggle('on-dark', state.logoInfo.lightness > .72);   // a white or silver logo is shown on a dark checkerboard, so the cut can be judged
     logoColours();
   }
   function logoColours() {

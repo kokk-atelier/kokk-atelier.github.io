@@ -788,12 +788,11 @@ function drawArtwork(ctx, pw, ph, config, artwork, inkCanvas) {
     source = inkCanvas;
   }
   if (HEX6.test(config.patch || '')) {
-    // KOKK for brands: a label woven in a brand colour behind a logo that would not show on the sedge itself
-    const pad = Math.max(9, Math.min(aw, ah) * 0.24), x = left - pad * 1.25, y = top - pad, w = aw + pad * 2.5, h = ah + pad * 2, r = Math.min(9, h * 0.16);
-    ctx.fillStyle = color(config.patch, -26); rounded(ctx, x - 0.9, y - 0.9, w + 1.8, h + 1.8, r + 0.9); ctx.fill();
-    ctx.fillStyle = config.patch; rounded(ctx, x, y, w, h, r); ctx.fill();
-    const stitch = HEX6.test(config.trim || '') ? color(config.trim, 0, .9) : color(config.patch, 90, .55);
-    ctx.save(); ctx.strokeStyle = stitch; ctx.lineWidth = 0.9; ctx.setLineDash([3.2, 2.4]); rounded(ctx, x + 3.4, y + 3.4, w - 6.8, h - 6.8, Math.max(1, r - 3)); ctx.stroke(); ctx.restore();
+    // KOKK for brands: a logo that would not show on the sedge (white, silver) gets a contour in a brand colour that follows its
+    // own shape, like a die-cut sticker (17 Nov, user: "why is there a blue frame round the logo": it was a rectangular label)
+    const t = ctx.getTransform(), k = Math.max(0.5, Math.hypot(t.a, t.b)), pad = Math.max(2.4, Math.sqrt(aw * ah) * 0.055);
+    const s = sticker(artwork, Math.max(1, Math.round(aw * k)), Math.max(1, Math.round(ah * k)), pad * k, config.patch);
+    ctx.drawImage(s.canvas, left - s.o / k, top - s.o / k, s.canvas.width / k, s.canvas.height / k);
   }
   ctx.globalAlpha = 0.94;
   ctx.drawImage(source, left, top, aw, ah);
@@ -801,6 +800,34 @@ function drawArtwork(ctx, pw, ph, config, artwork, inkCanvas) {
 }
 
 const HEX6 = /^#[0-9a-f]{6}$/i;
+// Sticker contour for a logo, at drawing size (w x h device pixels): the logo's solid pixels (more than 40% opaque, so a faint glow
+// does not swell it) widened by `pad` in 32 directions, in the brand colour with a slightly darker rim. Inner holes wider than the
+// contour stay open, so the sedge still shows inside a ring. Returns { canvas, o } where o is the margin on each side. Cached per
+// logo, size and colour (the cards redraw it on every tap).
+const stickerCache = new WeakMap();
+export function sticker(artwork, w, h, pad, hex) {
+  const key = [w, h, pad.toFixed(2), hex].join('|'), hit = stickerCache.get(artwork);
+  if (hit && hit.key === key) return hit;
+  const o = Math.ceil(pad) + 3, W = w + 2 * o, H = h + 2 * o;
+  const solid = document.createElement('canvas'); solid.width = w; solid.height = h;
+  const sx = solid.getContext('2d', { willReadFrequently: true }); sx.drawImage(artwork, 0, 0, w, h);
+  const img = sx.getImageData(0, 0, w, h), d = img.data;
+  for (let i = 0; i < d.length; i += 4) { d[i] = d[i + 1] = d[i + 2] = 0; d[i + 3] = d[i + 3] > 102 ? 255 : 0; }
+  sx.putImageData(img, 0, 0);
+  const grow = (r, fill) => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d');
+    for (let n = 0; n < 32; n++) { const a = n / 32 * Math.PI * 2; for (const f of [1, 0.66, 0.33]) x.drawImage(solid, o + Math.cos(a) * r * f, o + Math.sin(a) * r * f); }
+    x.drawImage(solid, o, o);
+    x.globalCompositeOperation = 'source-in'; x.fillStyle = fill; x.fillRect(0, 0, W, H);
+    return c;
+  };
+  const canvas = grow(pad + 0.9, color(hex, -28)), inner = grow(pad, hex);
+  canvas.getContext('2d').drawImage(inner, 0, 0);
+  solid.width = solid.height = inner.width = inner.height = 0;
+  const out = { key, canvas, o };
+  stickerCache.set(artwork, out);
+  return out;
+}
 // The KOKK name plate's own outline in the photo (traced at 7x): kept in its metal when config.plate is set.
 const PLATE = [[448, 199], [586.5, 197.6], [586, 206], [584.6, 225], [583.2, 234.5], [580, 239.4], [575, 241.6], [520, 242.4], [470, 243], [456.5, 242.8], [451.2, 240], [448.6, 235], [447.6, 226]];
 // Piping: a cord of constant width that follows the panel's whole outline (corner caps and name plate included).
