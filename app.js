@@ -1,8 +1,9 @@
-import * as R from './renderer.js?v=3';
+import * as R from './renderer.js?v=4';
 import { initCare } from './care.js?v=3';
 import * as host from './host.js?v=3';
 import { initBrands } from './brand.js?v=3';
 import { briefPdf } from './brief.js?v=3';
+import { initDirect } from './direct.js?v=4';
 const renderLuggage = (canvas, cfg, options = {}) => R.renderLuggage(canvas, cfg, options);
 const panelRect = (w, h, cfg, options = {}) => (typeof R.panelRect === 'function' ? R.panelRect(w, h, cfg, options) : null) || {x:.18*w, y:.15*h, w:.57*w, h:.70*h};
 if (typeof R.preload === 'function') { try { Promise.resolve(R.preload()).catch(() => {}); } catch {} }
@@ -29,6 +30,7 @@ const fontNames = {sans:'Modern',serif:'Classic',signature:'Signature',mono:'Typ
 const flagNames = {none:'ไม่มี',th:'ไทย',jp:'ญี่ปุ่น',fr:'ฝรั่งเศส',gb:'สหราชอาณาจักร',us:'สหรัฐอเมริกา'};
 const initial = {size:'cabin',shell:'#c5a16a',weave:'#e9d9bd',pattern:'twill',name:'',nameColor:'#35271f',nameSize:21,nameX:50,nameY:18,font:'sans',flag:'none',flagPosition:'side',artwork:null,artCut:false,artScale:65,artPosition:'center',artInk:null,artX:null,artY:null,accent:null,accent2:null,trim:null,patch:null,plate:false,finish:'matte',wheel:null};
 let config = {...initial};
+let direct = null;   // direct manipulation on the preview, set up below (see direct.js)
 let currentStep = 0;
 const mobileLayout = matchMedia('(max-width: 700px), (pointer: coarse)').matches;
 let previewVisible = false, previewFrame = 0, persistTimer = 0, pendingSwap = false, lastPreview = null, dimUntil = 0, dimTimer = 0;
@@ -39,9 +41,9 @@ function schedulePreview() {
   if (!previewVisible || previewFrame) return;
   previewFrame = requestAnimationFrame(() => {
     previewFrame = 0;
-    const next = {...config}, options = performance.now() < dimUntil ? {dimension:true} : {};
+    const next = {...config}, options = performance.now() < dimUntil && !direct?.dragging ? {dimension:true} : {};
     const from = pendingSwap ? lastPreview : null; pendingSwap = false; lastPreview = next;
-    swapRender(previewCanvas, from, next, options).catch(() => toast('แสดงภาพไม่สำเร็จ กรุณาลองอีกครั้ง'));
+    swapRender(previewCanvas, from, next, options).then(() => direct?.paint()).catch(() => toast('แสดงภาพไม่สำเร็จ กรุณาลองอีกครั้ง'));
   });
 }
 // Panel-swap animation: old look stays, the new panel wipes in from the right while the rest cross-fades.
@@ -72,7 +74,7 @@ async function swapRender(canvas, from, to, options = {}) {
       };
       requestAnimationFrame(frame);
     });
-    if (swapTokens.get(canvas) === token) { const ctx = canvas.getContext('2d'); ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(b, 0, 0); ctx.restore(); }
+    if (swapTokens.get(canvas) === token) { const ctx = canvas.getContext('2d'); ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(b, 0, 0); ctx.restore(); R.invalidate?.(canvas); }
   } finally { a.width = a.height = b.width = b.height = 0; }
 }
 function renderWhenVisible(canvas, settings, options = {}) {
@@ -149,19 +151,29 @@ function update(){
  document.querySelectorAll('[data-pattern]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.pattern===config.pattern)));
  document.querySelectorAll('[data-look]').forEach(el=>{const l=looks[Number(el.dataset.look)];el.setAttribute('aria-pressed',String(l.shell===config.shell&&l.weave===config.weave&&l.pattern===config.pattern));});
  document.querySelectorAll('[data-font]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.font===config.font)));
- document.querySelectorAll('[data-name-position]').forEach(el=>{const [x,y]=el.dataset.namePosition.split(',').map(Number);el.setAttribute('aria-pressed',String(Math.abs(config.nameX-x)<.1&&Math.abs(config.nameY-y)<.1));});
+ liveSync();
+ $('art-cut').checked=config.artCut;
+ $('art-controls').hidden=!config.artwork;$('upload-label').textContent=config.artwork?'เปลี่ยนภาพสกรีน':'เลือกภาพหรือลายของคุณ';clearTimeout(persistTimer);persistTimer=setTimeout(persistDraft,250);
+}
+// Position and size read-outs: cheap enough to run on every drag frame (the full update() also rebuilds the price and pressed states).
+const fill=el=>el.style.setProperty('--fill',((el.value-el.min)/(el.max-el.min)*100).toFixed(1)+'%');
+function liveSync(){
+ const near=(a,b)=>Math.abs(a-b)<.6;
+ document.querySelectorAll('[data-name-position]').forEach(el=>{const [x,y]=el.dataset.namePosition.split(',').map(Number);el.setAttribute('aria-pressed',String(near(config.nameX,x)&&near(config.nameY,y)));});
+ $('name-size').value=config.nameSize;$('name-x').value=config.nameX;$('name-y').value=config.nameY;$('art-scale').value=config.artScale;
  $('name-size-value').textContent=Math.round(config.nameSize/21*100)+'%';
  $('name-x-value').textContent=Math.round(config.nameX)+'%';$('name-y-value').textContent=Math.round(config.nameY)+'%';
- {const [ax,ay]=artCentre();$('art-x').value=ax;$('art-y').value=ay;$('art-x-value').textContent=Math.round(ax)+'%';$('art-y-value').textContent=Math.round(ay)+'%';$('art-cut').checked=config.artCut;
-  document.querySelectorAll('[data-art-position]').forEach(el=>{const [x,y]=el.dataset.artPosition.split(',').map(Number);el.setAttribute('aria-pressed',String(Math.abs(ax-x)<.1&&Math.abs(ay-y)<.1));});
-  previewCanvas.style.cursor=config.artwork&&!mobileLayout?'move':'';}
- $('art-controls').hidden=!config.artwork;$('upload-label').textContent=config.artwork?'เปลี่ยนภาพสกรีน':'เลือกภาพหรือลายของคุณ';clearTimeout(persistTimer);persistTimer=setTimeout(persistDraft,250);
+ const [ax,ay]=artCentre();$('art-x').value=ax;$('art-y').value=ay;$('art-x-value').textContent=Math.round(ax)+'%';$('art-y-value').textContent=Math.round(ay)+'%';
+ $('art-scale-value')&&($('art-scale-value').textContent=Math.round(config.artScale)+'%');
+ document.querySelectorAll('[data-art-position]').forEach(el=>{const [x,y]=el.dataset.artPosition.split(',').map(Number);el.setAttribute('aria-pressed',String(near(ax,x)&&near(ay,y)));});
+ document.querySelectorAll('.controls input[type=range]').forEach(fill);
+ clearTimeout(persistTimer);persistTimer=setTimeout(persistDraft,250);
 }
 function syncInputs(){
  const mapping={name:'name','name-size':'nameSize','name-x':'nameX','name-y':'nameY',font:'font',flag:'flag','flag-position':'flagPosition','name-color':'nameColor','art-scale':'artScale',finish:'finish','shell-custom':'shell','weave-custom':'weave'};
  for(const [id,key] of Object.entries(mapping)) $(id).value=config[key];
 }
-function setStep(step){currentStep=step;document.querySelectorAll('[data-step]').forEach(b=>{b.setAttribute('aria-selected',String(Number(b.dataset.step)===step));b.tabIndex=Number(b.dataset.step)===step?0:-1;});document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=Number(p.dataset.panel)!==step);$('next-step').innerHTML='<span>'+['เลือกงานสาน '+AR_E,'ใส่ความเป็นคุณ '+AR_E,'ดูสรุปดีไซน์ '+AR][step]+'</span>';}
+function setStep(step){currentStep=step;document.querySelectorAll('[data-step]').forEach(b=>{b.setAttribute('aria-selected',String(Number(b.dataset.step)===step));b.tabIndex=Number(b.dataset.step)===step?0:-1;});document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=Number(p.dataset.panel)!==step);$('next-step').innerHTML='<span>'+['เลือกงานสาน '+AR_E,'ใส่ความเป็นคุณ '+AR_E,'ดูสรุปดีไซน์ '+AR][step]+'</span>';if(direct){if(step===2&&!direct.selected)direct.select(config.name.trim()?'name':'art');direct.paint();}}
 document.querySelectorAll('[data-step]').forEach(b=>{b.addEventListener('click',()=>setStep(Number(b.dataset.step)));b.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();setStep((currentStep+(e.key==='ArrowRight'?1:2))%3);document.querySelector(`[data-step="${currentStep}"]`).focus();}});});
 $('next-step').onclick=()=>currentStep<2?setStep(currentStep+1):showSummary();
 $('size-options').innerHTML=Object.entries(sizes).map(([key,s])=>`<button class="size-choice" data-size="${key}" aria-pressed="false"><span><strong>${s.label}</strong><small>${s.dimensions} · ${s.trip}</small></span><span>${money(s.price)}</span></button>`).join('');
@@ -182,7 +194,7 @@ $('pattern-options').innerHTML=Object.entries(patterns).map(([key,label])=>`<but
 document.querySelectorAll('[data-pattern]').forEach(b=>b.onclick=()=>{if(config.pattern!==b.dataset.pattern)pendingSwap=true;config.pattern=b.dataset.pattern;update();});
 for(const [id,key] of Object.entries({name:'name','name-size':'nameSize','name-x':'nameX','name-y':'nameY',font:'font',flag:'flag','flag-position':'flagPosition','name-color':'nameColor','art-scale':'artScale',finish:'finish'})) $(id).addEventListener('input',e=>{config[key]=['artScale','nameSize','nameX','nameY'].includes(key)?Number(e.target.value):e.target.value;update();});
 document.querySelectorAll('[data-font]').forEach(button=>button.onclick=()=>{config.font=button.dataset.font;$('font').value=config.font;update();if(config.font==='signature' && document.fonts)document.fonts.load('500 24px Caveat').then(schedulePreview).catch(()=>{});});
- document.querySelectorAll('[data-name-position]').forEach(button=>button.onclick=()=>{const [x,y]=button.dataset.namePosition.split(',').map(Number);config.nameX=x;config.nameY=y;$('name-x').value=x;$('name-y').value=y;update();});
+ document.querySelectorAll('[data-name-position]').forEach(button=>button.onclick=()=>{const [x,y]=button.dataset.namePosition.split(',').map(Number);config.nameX=x;config.nameY=y;$('name-x').value=x;$('name-y').value=y;update();direct.select('name');});
 async function decodeUpload(file) {
   const url=URL.createObjectURL(file);
   try {
@@ -204,27 +216,25 @@ async function decodeUpload(file) {
 $('artwork').addEventListener('change',async e=>{
  const file=e.target.files[0];if(!file)return;const ticket=++uploadVersion;
  if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>8*1024*1024){toast('เลือกภาพ PNG, JPG หรือ WEBP ขนาดไม่เกิน 8 MB');e.target.value='';return;}
- try{const image=await decodeUpload(file);if(ticket!==uploadVersion)return;config.artwork=image.data;config.artCut=image.flat;update();toast(image.flat?'เพิ่มภาพแล้ว · ไดคัทพื้นหลังให้แล้ว (ปิดได้)':'เพิ่มภาพสกรีนแล้ว');}catch{toast('เปิดภาพนี้ไม่ได้ กรุณาลองไฟล์อื่น');}finally{e.target.value='';}
+ try{const image=await decodeUpload(file);if(ticket!==uploadVersion)return;config.artwork=image.data;config.artCut=image.flat;update();direct.select('art');toast(image.flat?'เพิ่มภาพแล้ว · ไดคัทพื้นหลังให้แล้ว (ปิดได้)':'เพิ่มภาพสกรีนแล้ว');}catch{toast('เปิดภาพนี้ไม่ได้ กรุณาลองไฟล์อื่น');}finally{e.target.value='';}
 });
 // Artwork position (14 Nov, user: pictures and logos can be moved): 9-point grid + sliders like the name, and on a
 // mouse or pen, drag on the preview (relative drag anywhere on the panel; touch keeps the page scroll, so phones use the controls).
 function artCentre(c=config){return [c.artX??50, c.artY??({upper:32,lower:72}[c.artPosition]??54)];}
 function setArt(x,y){config.artX=Math.max(0,Math.min(100,x));config.artY=Math.max(0,Math.min(100,y));update();}
 $('art-grid').innerHTML=document.querySelector('[aria-label="เลือกตำแหน่งชื่อ"]').innerHTML.replaceAll('data-name-position','data-art-position').replaceAll('ชื่อ','ภาพ').replace(/"(\d+),15"/g,'"$1,20"').replace(/"(\d+),85"/g,'"$1,80"');
-document.querySelectorAll('[data-art-position]').forEach(b=>b.onclick=()=>{const [x,y]=b.dataset.artPosition.split(',').map(Number);setArt(x,y);});
+document.querySelectorAll('[data-art-position]').forEach(b=>b.onclick=()=>{const [x,y]=b.dataset.artPosition.split(',').map(Number);setArt(x,y);direct.select('art');});
 for(const axis of ['x','y'])$('art-'+axis).addEventListener('input',e=>{const [x,y]=artCentre();axis==='x'?setArt(Number(e.target.value),y):setArt(x,Number(e.target.value));});
 $('art-cut').addEventListener('change',e=>{config.artCut=e.target.checked;update();});
-let artDrag=null;
-previewCanvas.addEventListener('pointerdown',e=>{
- if(!config.artwork||e.pointerType==='touch'||e.button!==0)return;
- const box=previewCanvas.getBoundingClientRect(),k=previewCanvas.width/box.width,p=panelRect(previewCanvas.width,previewCanvas.height,config,{});
- const cx=(e.clientX-box.left)*k,cy=(e.clientY-box.top)*k;
- if(cx<p.x||cx>p.x+p.w||cy<p.y||cy>p.y+p.h)return;
- artDrag={sx:e.clientX,sy:e.clientY,k,p,start:artCentre()};previewCanvas.setPointerCapture(e.pointerId);e.preventDefault();
-});
-previewCanvas.addEventListener('pointermove',e=>{if(!artDrag)return;const d=artDrag;setArt(d.start[0]+(e.clientX-d.sx)*d.k/d.p.w*100,d.start[1]+(e.clientY-d.sy)*d.k/d.p.h*100);});
-for(const type of ['pointerup','pointercancel'])previewCanvas.addEventListener(type,()=>{artDrag=null;});
-$('remove-art').onclick=()=>{uploadVersion++;config.artwork=null;update();};
+$('name').addEventListener('input',()=>direct.select('name'));
+for(const id of ['name-size','name-x','name-y','font'])$(id).addEventListener('input',()=>direct.select('name'));
+for(const id of ['art-scale','art-x','art-y'])$(id).addEventListener('input',()=>direct.select('art'));
+$('remove-art').onclick=()=>{uploadVersion++;config.artwork=null;update();direct.select(null);};
+// Direct manipulation on the preview (see direct.js): drag, corner handles, pinch, arrow keys.
+direct=initDirect({canvas:previewCanvas,overlay:$('stage-ui'),bar:$('stage-bar'),hint:$('stage-hint'),R,artCentre,toast,
+ getConfig:()=>config,isActive:()=>currentStep===2,
+ apply:patch=>{const structural='name' in patch||'artwork' in patch;if('artwork' in patch&&!patch.artwork)uploadVersion++;Object.assign(config,patch);if('name' in patch)$('name').value=config.name;structural?update():(schedulePreview(),liveSync());},
+ commit:()=>update(),onEdit:()=>{if(currentStep!==2)setStep(2);$('name').focus({preventScroll:mobileLayout});$('name').select();}});
 $('reset').onclick=()=>{uploadVersion++;const before={...config};config={...initial};syncInputs();setStep(0);update();toast('เริ่มออกแบบใหม่แล้ว',{label:'เลิกทำ',run:()=>{config=cleanConfig(before);syncInputs();update();toast('กลับไปที่แบบเดิมแล้ว');}});};
 // Every download goes through host.saveFile; inside a host without downloads the image dialog takes over.
 async function saveBlob(blob,name){const result=await host.saveFile(blob,name);if(result==='manual'){if(blob.type.startsWith('image/'))showImageActions(blob);else showModal('<p class="eyebrow">DESIGN BRIEF</p><h2 class="modal-title">สรุปดีไซน์ของคุณ</h2><p class="fineprint">คัดลอกข้อความด้านล่างเก็บไว้ได้เลย</p><pre class="brief-text">'+esc(await blob.text())+'</pre>');}return result;}

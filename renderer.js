@@ -390,8 +390,9 @@ function drawPanel(ctx, px, py, pw, ph, config, artwork, paintWeave = true) {
     ctx.globalAlpha = 0.93;
     ctx.fillText(text, nameX, nameY);
     ctx.globalAlpha = 1;
+    return { x: nameX - leftExtent, y: nameY - ascent, w: leftExtent + rightExtent, h: ascent + descent };
   }
-
+  return null;
 }
 
 /** Draws a self-contained studio view. Canvas pixel size is controlled by its caller. */
@@ -624,11 +625,11 @@ function scratch(width, height) {
   if (entry) { pool.delete(key); pool.set(key, entry); return entry; }
   if (pool.size >= 2) {
     const [oldKey, old] = pool.entries().next().value;
-    for (const c of [old.a, old.b, old.c, old.fibre, old.trim, old.print, old.ink]) { c.width = 0; c.height = 0; }
+    for (const c of [old.a, old.b, old.c, old.fibre, old.trim, old.print, old.ink, old.base, old.pbase]) { c.width = 0; c.height = 0; }
     pool.delete(oldKey);
   }
   const make = (w = width, h = height) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
-  entry = { a: make(), b: make(), c: make(), fibre: make(), fibreKey: '', trim: make(1, 1), trimKey: '', print: make(1, 1), ink: make(1, 1) };
+  entry = { a: make(), b: make(), c: make(), fibre: make(), fibreKey: '', trim: make(1, 1), trimKey: '', print: make(1, 1), ink: make(1, 1), base: make(), baseKey: '', pbase: make(1, 1), pbaseKey: '' };
   pool.set(key, entry);
   return entry;
 }
@@ -797,6 +798,7 @@ function drawArtwork(ctx, pw, ph, config, artwork, inkCanvas) {
   ctx.globalAlpha = 0.94;
   ctx.drawImage(source, left, top, aw, ah);
   ctx.globalAlpha = 1;
+  return { x: left, y: top, w: aw, h: ah };
 }
 
 const HEX6 = /^#[0-9a-f]{6}$/i;
@@ -882,6 +884,10 @@ function drawDimension(ctx, L, config, width) {
 }
 
 /** A static product photograph, recoloured through masks and personalised with Canvas 2D only. */
+// Fields that only move or resize the name or the picture (see the dirty-rectangle path in renderLuggage).
+const MOVABLE = new Set(['nameX', 'nameY', 'nameSize', 'artX', 'artY', 'artScale', 'artwork']);
+const lastRender = new WeakMap();
+export function invalidate(canvas) { lastRender.delete(canvas); }
 export async function renderLuggage(canvas, input = {}, options = {}) {
   const ticket = (renderVersions.get(canvas) || 0) + 1; renderVersions.set(canvas, ticket);
   const config = { size: 'cabin', shell: '#c5a16a', weave: '#e9d9bd', pattern: 'twill', name: '', nameColor: '#35271f', font: 'sans', flag: 'none', flagPosition: 'top', artwork: null, artScale: 65, artPosition: 'center', finish: 'matte', artInk: null, artX: null, artY: null, accent: null, accent2: null, trim: null, patch: null, plate: false, wheel: null, artCut: false, ...input };
@@ -894,46 +900,53 @@ export async function renderLuggage(canvas, input = {}, options = {}) {
   const width = canvas.width, height = canvas.height;
   const L = layout(width, height, config, options);
   const S = scratch(width, height);
-  reset(ctx); ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#ead6b8'; ctx.fillRect(0, 0, width, height);
+  // 1–3b) the bag itself (photo, shell, sedge, wheels, plate) depends only on these choices: built once and reused, so dragging
+  // a name or a picture repaints only the print layer (19 Nov, user: drag must be smooth, 60 fps)
+  const baseKey = [width, height, L.k.toFixed(5), L.ox.toFixed(2), L.oy.toFixed(2), config.shell, config.weave, config.wheel, config.plate, !!options.export].join('|');
+  if (S.baseKey !== baseKey) {
+    const g = fit(S.base, width, height);
+    g.fillStyle = '#ead6b8'; g.fillRect(0, 0, width, height);
 
-  // 1) photo, uniform scale
-  placePhoto(ctx, L, assets.photo);
+    // 1) photo, uniform scale
+    placePhoto(g, L, assets.photo);
 
-  // 1b) crevices, latch pockets and swivel housings take the shell's hue/saturation only (no lightness change)
-  const nativeShell = String(config.shell).toLowerCase() === NATIVE_SHELL;   // the photo already IS champagne: leave it untouched
-  if (assets.hue && !nativeShell && /^#[0-9a-f]{6}$/i.test(config.shell || '')) {
-    const a = fit(S.a, width, height);
-    placePhoto(a, L, assets.photo);
-    a.save(); a.setTransform(L.k, 0, 0, L.k, L.ox, L.oy);
-    a.globalCompositeOperation = 'color'; a.fillStyle = config.shell; a.fillRect(SHELL_BOX.x0, SHELL_BOX.y0, SHELL_BOX.x1 - SHELL_BOX.x0, SHELL_BOX.y1 - SHELL_BOX.y0);
-    a.globalCompositeOperation = 'destination-in'; a.drawImage(assets.hue, 0, 0, PHOTO.w, PHOTO.h);
-    a.restore();
-    ctx.drawImage(S.a, 0, 0);
-  }
+    // 1b) crevices, latch pockets and swivel housings take the shell's hue/saturation only (no lightness change)
+    const nativeShell = String(config.shell).toLowerCase() === NATIVE_SHELL;   // the photo already IS champagne: leave it untouched
+    if (assets.hue && !nativeShell && /^#[0-9a-f]{6}$/i.test(config.shell || '')) {
+      const a = fit(S.a, width, height);
+      placePhoto(a, L, assets.photo);
+      a.save(); a.setTransform(L.k, 0, 0, L.k, L.ox, L.oy);
+      a.globalCompositeOperation = 'color'; a.fillStyle = config.shell; a.fillRect(SHELL_BOX.x0, SHELL_BOX.y0, SHELL_BOX.x1 - SHELL_BOX.x0, SHELL_BOX.y1 - SHELL_BOX.y0);
+      a.globalCompositeOperation = 'destination-in'; a.drawImage(assets.hue, 0, 0, PHOTO.w, PHOTO.h);
+      a.restore();
+      g.drawImage(S.a, 0, 0);
+    }
 
-  // 2) shell metal  3) woven panel + handle wrap
-  for (const [hex, reference, mask, box] of [[config.shell, 170, assets.shell, SHELL_BOX], [config.weave, 218, assets.weave, WEAVE_BOX]]) {
-    if (nativeShell && mask === assets.shell) continue;
-    const a = fit(S.a, width, height);
-    placePhoto(a, L, assets.photo);
-    tintLayer(a, L, hex, reference, mask, box);
-    ctx.drawImage(S.a, 0, 0);
-  }
-  // 3b) wheel hub discs in their own colour (null = they follow the shell, as above)
-  if (assets.wheel && HEX6.test(config.wheel || '')) {
-    const a = fit(S.a, width, height);
-    placePhoto(a, L, assets.photo);
-    if (String(config.wheel).toLowerCase() === NATIVE_SHELL) {      // champagne hubs = the photo's own metal, untouched
-      a.save(); a.setTransform(L.k, 0, 0, L.k, L.ox, L.oy); a.globalCompositeOperation = 'destination-in'; a.drawImage(assets.wheel, 0, 0, PHOTO.w, PHOTO.h); a.restore();
-    } else tintLayer(a, L, config.wheel, 170, assets.wheel, WHEEL_BOX);
-    ctx.drawImage(S.a, 0, 0);
-  }
-  if (config.plate && !nativeShell) {                       // the KOKK name plate stays in its own metal on a coloured frame
-    ctx.save(); ctx.beginPath(); ctx.rect(L.clip.x, L.clip.y, L.clip.w, L.clip.h); ctx.clip();
-    ctx.setTransform(L.k, 0, 0, L.k, L.ox, L.oy);
-    ctx.beginPath(); PLATE.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.clip();
-    ctx.drawImage(assets.photo, 0, 0, PHOTO.w, PHOTO.h); ctx.restore();
+    // 2) shell metal  3) woven panel + handle wrap
+    for (const [hex, reference, mask, box] of [[config.shell, 170, assets.shell, SHELL_BOX], [config.weave, 218, assets.weave, WEAVE_BOX]]) {
+      if (nativeShell && mask === assets.shell) continue;
+      const a = fit(S.a, width, height);
+      placePhoto(a, L, assets.photo);
+      tintLayer(a, L, hex, reference, mask, box);
+      g.drawImage(S.a, 0, 0);
+    }
+    // 3b) wheel hub discs in their own colour (null = they follow the shell, as above)
+    if (assets.wheel && HEX6.test(config.wheel || '')) {
+      const a = fit(S.a, width, height);
+      placePhoto(a, L, assets.photo);
+      if (String(config.wheel).toLowerCase() === NATIVE_SHELL) {      // champagne hubs = the photo's own metal, untouched
+        a.save(); a.setTransform(L.k, 0, 0, L.k, L.ox, L.oy); a.globalCompositeOperation = 'destination-in'; a.drawImage(assets.wheel, 0, 0, PHOTO.w, PHOTO.h); a.restore();
+      } else tintLayer(a, L, config.wheel, 170, assets.wheel, WHEEL_BOX);
+      g.drawImage(S.a, 0, 0);
+    }
+    if (config.plate && !nativeShell) {                       // the KOKK name plate stays in its own metal on a coloured frame
+      g.save(); g.beginPath(); g.rect(L.clip.x, L.clip.y, L.clip.w, L.clip.h); g.clip();
+      g.setTransform(L.k, 0, 0, L.k, L.ox, L.oy);
+      g.beginPath(); PLATE.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.clip();
+      g.drawImage(assets.photo, 0, 0, PHOTO.w, PHOTO.h); g.restore();
+    }
+    reset(g);
+    S.baseKey = baseKey;
   }
   const piping = HEX6.test(config.trim || '') ? pipingRing(S, L, assets.panel, config.trim, width, height) : null;   // uses S.a and S.c: build it before they are needed below
 
@@ -942,23 +955,64 @@ export async function renderLuggage(canvas, input = {}, options = {}) {
   const pw = size.width - 46, ph = size.height - 48;
   const dW = (PANEL.xR - PANEL.xL) * L.k, dH = Math.max(PANEL.hL, PANEL.hR) * L.k;
   const Pw = Math.max(8, Math.ceil(dW)), Ph = Math.max(8, Math.ceil(dH));
-  const p = fit(S.print, Pw, Ph);
-  p.scale(Pw / pw, Ph / ph);
-  patternAccents(p, pw, ph, config);
-  if (config.finish === 'satin') {
-    const sheen = p.createLinearGradient(0, ph, pw, 0);
-    sheen.addColorStop(0, 'rgba(255,255,255,0)'); sheen.addColorStop(0.6, 'rgba(255,255,255,.18)'); sheen.addColorStop(1, 'rgba(255,255,255,0)');
-    p.fillStyle = sheen; p.fillRect(0, 0, pw, ph);
+  const pbaseKey = [Pw, Ph, pw, ph, config.pattern, config.weave, config.accent, config.accent2, config.finish].join('|');
+  if (S.pbaseKey !== pbaseKey) {
+    const q = fit(S.pbase, Pw, Ph);
+    q.scale(Pw / pw, Ph / ph);
+    patternAccents(q, pw, ph, config);
+    if (config.finish === 'satin') {
+      const sheen = q.createLinearGradient(0, ph, pw, 0);
+      sheen.addColorStop(0, 'rgba(255,255,255,0)'); sheen.addColorStop(0.6, 'rgba(255,255,255,.18)'); sheen.addColorStop(1, 'rgba(255,255,255,0)');
+      q.fillStyle = sheen; q.fillRect(0, 0, pw, ph);
+    }
+    reset(q);
+    S.pbaseKey = pbaseKey;
   }
-  if (artwork) drawArtwork(p, pw, ph, config, artwork, S.ink);
-  drawPanel(p, 0, 0, pw, ph, config, null, false);
+  const p = fit(S.print, Pw, Ph);
+  p.drawImage(S.pbase, 0, 0);
+  p.scale(Pw / pw, Ph / ph);
+  const artBox = artwork ? drawArtwork(p, pw, ph, config, artwork, S.ink) : null;
+  const nameBox = drawPanel(p, 0, 0, pw, ph, config, null, false);
   reset(p);
 
-  const b = fit(S.b, width, height);
+  // 5) map the flat print onto the panel. When only a name's or a picture's place or size changed since this canvas was last
+  // drawn (a drag), only the rectangle they covered before and cover now is redrawn: the rest of the canvas is already right.
   const X0 = L.ox + PANEL.xL * L.k, X1 = L.ox + PANEL.xR * L.k, span = X1 - X0;
   const sOf = t => t * PANEL.hR / (PANEL.hL + t * (PANEL.hR - PANEL.hL));
-  const STRIP = 2.5;
-  for (let dx = 0; dx < span; dx += STRIP) {
+  const toCanvas = (u, v) => {
+    const s = Math.max(0, Math.min(1, u / pw)), t = s * PANEL.hL / (PANEL.hR - s * (PANEL.hR - PANEL.hL));
+    const xc = PANEL.xL + t * (PANEL.xR - PANEL.xL), yT = L.oy + PANEL.top(xc) * L.k, yB = L.oy + PANEL.bottom(xc) * L.k;
+    return [X0 + t * span, yT + v / ph * (yB - yT)];
+  };
+  const rectOf = box => {
+    if (!box) return null;
+    const m = 6 + 0.08 * Math.max(box.w, box.h), pts = [[box.x - m, box.y - m], [box.x + box.w + m, box.y - m], [box.x - m, box.y + box.h + m], [box.x + box.w + m, box.y + box.h + m]].map(([u, v]) => toCanvas(u, v));
+    const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+    return { x0: Math.min(...xs) - 3, y0: Math.min(...ys) - 3, x1: Math.max(...xs) + 3, y1: Math.max(...ys) + 3 };
+  };
+  const nameRect = rectOf(nameBox), artRect = rectOf(artBox);
+  const R = (() => { const bx = PANEL.box, x = Math.max(0, Math.floor(L.ox + bx.x0 * L.k) - 4), y = Math.max(0, Math.floor(L.oy + bx.y0 * L.k) - 4);
+    return { x, y, w: Math.min(width, Math.ceil(L.ox + bx.x1 * L.k) + 4) - x, h: Math.min(height, Math.ceil(L.oy + bx.y1 * L.k) + 4) - y }; })();
+  const sig = [width, height, L.k.toFixed(5), L.ox.toFixed(2), L.oy.toFixed(2), !!options.export, !!options.dimension, JSON.stringify(Object.entries(config).filter(([key]) => !MOVABLE.has(key)))].join('|');
+  const prev = lastRender.get(canvas);
+  let D = R, fast = false;
+  if (!options.export && !options.dimension && prev && prev.sig === sig && prev.art === artwork && prev.base === S.baseKey) {
+    const parts = [prev.nameRect, prev.artRect, nameRect, artRect].filter(Boolean);
+    if (parts.length) {
+      const x0 = Math.max(R.x, Math.floor(Math.min(...parts.map(r => r.x0)))), y0 = Math.max(R.y, Math.floor(Math.min(...parts.map(r => r.y0))));
+      const x1 = Math.min(R.x + R.w, Math.ceil(Math.max(...parts.map(r => r.x1)))), y1 = Math.min(R.y + R.h, Math.ceil(Math.max(...parts.map(r => r.y1))));
+      D = { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) }; fast = true;
+    } else D = { x: R.x, y: R.y, w: 1, h: 1 };
+  }
+  lastRender.set(canvas, { sig, art: artwork, base: S.baseKey, nameRect, artRect });
+  const region = (g, src) => g.drawImage(src, D.x, D.y, D.w, D.h, D.x, D.y, D.w, D.h);
+  reset(ctx);
+  if (!fast) { ctx.clearRect(0, 0, width, height); ctx.drawImage(S.base, 0, 0); }
+
+  const b = S.b.getContext('2d'); reset(b);
+  b.save(); b.beginPath(); b.rect(D.x, D.y, D.w, D.h); b.clip(); b.clearRect(D.x, D.y, D.w, D.h);
+  const STRIP = 2.5, first = Math.max(0, Math.floor((D.x - X0) / STRIP) * STRIP - STRIP), last = Math.min(span, D.x + D.w - X0 + STRIP);
+  for (let dx = first; dx < last; dx += STRIP) {
     const t0 = dx / span, t1 = Math.min(1, (dx + STRIP) / span);
     const s0 = sOf(t0) * Pw, s1 = sOf(t1) * Pw;
     const xc = PANEL.xL + ((t0 + t1) / 2) * (PANEL.xR - PANEL.xL);      // photo x at the strip centre
@@ -967,12 +1021,13 @@ export async function renderLuggage(canvas, input = {}, options = {}) {
     if (t1 < 1) { srcW *= (destW + 1) / destW; destW += 1; }            // 1px overlap hides seams
     b.drawImage(S.print, s0, 0, Math.min(Pw - s0, srcW), Ph, X0 + dx, yT, destW, yB - yT);
   }
-  b.save(); b.globalCompositeOperation = 'destination-in';
-  b.setTransform(L.k, 0, 0, L.k, L.ox, L.oy); b.drawImage(assets.panel, 0, 0, PHOTO.w, PHOTO.h); b.restore();
+  b.globalCompositeOperation = 'destination-in';
+  b.setTransform(L.k, 0, 0, L.k, L.ox, L.oy); b.drawImage(assets.panel, 0, 0, PHOTO.w, PHOTO.h); b.setTransform(1, 0, 0, 1, 0, 0);
   if (piping) { b.globalCompositeOperation = 'source-over'; b.drawImage(piping, 0, 0); }
-  if (options.export) { b.globalCompositeOperation = 'destination-in'; b.fillStyle = '#000'; b.fillRect(L.clip.x, L.clip.y, L.clip.w, L.clip.h); b.globalCompositeOperation = 'source-over'; }
+  if (options.export) { b.globalCompositeOperation = 'destination-in'; b.fillStyle = '#000'; b.fillRect(L.clip.x, L.clip.y, L.clip.w, L.clip.h); }
+  b.restore(); reset(b);
 
-  // 5) printed on sedge: multiply a normalised fibre texture from the photo, keep the print's own alpha
+  // printed on sedge: multiply a normalised fibre texture from the photo, keep the print's own alpha
   const fibreKey = [width, height, L.k.toFixed(5), L.ox.toFixed(2), L.oy.toFixed(2)].join('|');
   if (S.fibreKey !== fibreKey) {
     const f = fit(S.fibre, width, height);
@@ -982,12 +1037,13 @@ export async function renderLuggage(canvas, input = {}, options = {}) {
     reset(f);
     S.fibreKey = fibreKey;
   }
-  const c = fit(S.c, width, height);
-  c.drawImage(S.b, 0, 0);
-  b.globalCompositeOperation = 'multiply'; b.drawImage(S.fibre, 0, 0);
-  b.globalCompositeOperation = 'destination-in'; b.drawImage(S.c, 0, 0);
+  const c = S.c.getContext('2d'); reset(c); c.clearRect(D.x, D.y, D.w, D.h);
+  region(c, S.b);
+  b.globalCompositeOperation = 'multiply'; region(b, S.fibre);
+  b.globalCompositeOperation = 'destination-in'; region(b, S.c);
   reset(b);
-  ctx.globalAlpha = 0.92; ctx.drawImage(S.b, 0, 0); ctx.globalAlpha = 1;
+  if (fast) { ctx.clearRect(D.x, D.y, D.w, D.h); region(ctx, S.base); }
+  ctx.globalAlpha = 0.92; region(ctx, S.b); ctx.globalAlpha = 1;
 
   // export: soften the photo's sides into the paper so the fitted photo reads as a print, not a band
   if (options.export) {
@@ -1011,7 +1067,27 @@ export async function renderLuggage(canvas, input = {}, options = {}) {
   } else if (options.dimension) {
     drawDimension(ctx, L, config, width);
   }
-  reset(ctx);
+  reset(ctx);  const yTop = L.oy + Math.min(PANEL.top(PANEL.xL), PANEL.top(PANEL.xR)) * L.k, yBot = L.oy + Math.max(PANEL.bottom(PANEL.xL), PANEL.bottom(PANEL.xR)) * L.k;
+  geometries.set(canvas, { width, height, k: L.k, ox: L.ox, oy: L.oy, X0, span, pw, ph, name: nameBox, art: artBox, bounds: { x: X0, y: yTop, w: span, h: yBot - yTop } });
+}
+
+// Where things sit on a rendered canvas, for direct manipulation: the panel's print space (pw x ph units, the same space
+// nameX/nameY and artX/artY are percentages of) mapped to canvas pixels through the panel's perspective, and back.
+const geometries = new WeakMap();
+export function geometry(canvas) {
+  const G = geometries.get(canvas);
+  if (!G || G.width !== canvas.width || G.height !== canvas.height) return null;
+  const toCanvas = (u, v) => {
+    const s = Math.max(0, Math.min(1, u / G.pw)), t = s * PANEL.hL / (PANEL.hR - s * (PANEL.hR - PANEL.hL));
+    const xc = PANEL.xL + t * (PANEL.xR - PANEL.xL), yT = G.oy + PANEL.top(xc) * G.k, yB = G.oy + PANEL.bottom(xc) * G.k;
+    return [G.X0 + t * G.span, yT + v / G.ph * (yB - yT)];
+  };
+  const toPanel = (x, y) => {
+    const t = (x - G.X0) / G.span, s = t * PANEL.hR / (PANEL.hL + t * (PANEL.hR - PANEL.hL));
+    const xc = PANEL.xL + t * (PANEL.xR - PANEL.xL), yT = G.oy + PANEL.top(xc) * G.k, yB = G.oy + PANEL.bottom(xc) * G.k;
+    return [s * G.pw, (y - yT) / (yB - yT) * G.ph];
+  };
+  return { ...G, toCanvas, toPanel };
 }
 
 export { sizes, renderIllustratedLuggage };
